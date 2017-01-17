@@ -45,21 +45,32 @@
 typedef struct _wlan_if_obj_t {
     mp_obj_base_t base;
     int if_id;
+    mp_obj_t *cb_sniffer_rx; // monitor mode only
 } wlan_if_obj_t;
 
 void error_check(bool status, const char *msg);
+
 const mp_obj_type_t wlan_if_type;
 
-STATIC const wlan_if_obj_t wlan_objs[] = {
+STATIC wlan_if_obj_t wlan_objs[] = {
     {{&wlan_if_type}, STATION_IF},
-    {{&wlan_if_type}, SOFTAP_IF},
+    {{&wlan_if_type}, SOFTAP_IF}
 };
+
+extern mp_obj_t esp_parse_sniffer_rx(uint8* buf, uint16 len);
 
 STATIC void require_if(mp_obj_t wlan_if, int if_no) {
     wlan_if_obj_t *self = MP_OBJ_TO_PTR(wlan_if);
     if (self->if_id != if_no) {
         error_check(false, if_no == STATION_IF ? "STA required" : "AP required");
     }
+}
+
+STATIC void esp_sniffer_rx_cb(uint8* buf, uint16 len)
+{
+    mp_obj_t res = esp_parse_sniffer_rx(buf, len);
+
+    mp_call_function_1_protected(wlan_objs[STATION_IF].cb_sniffer_rx, res);
 }
 
 STATIC mp_obj_t get_wlan(mp_uint_t n_args, const mp_obj_t *args) {
@@ -69,7 +80,7 @@ STATIC mp_obj_t get_wlan(mp_uint_t n_args, const mp_obj_t *args) {
     }
     return MP_OBJ_FROM_PTR(&wlan_objs[idx]);
 }
-STATIC MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(get_wlan_obj, 0, 1, get_wlan);
+STATIC MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(get_wlan_obj, 0, 2, get_wlan);
 
 STATIC mp_obj_t esp_active(mp_uint_t n_args, const mp_obj_t *args) {
     wlan_if_obj_t *self = MP_OBJ_TO_PTR(args[0]);
@@ -173,6 +184,30 @@ STATIC void esp_scan_cb(void *result, STATUS status) {
     }
     esp_scan_list = NULL;
 }
+
+// TODO: change to setpromisc
+STATIC mp_obj_t esp_setpromisc(mp_uint_t n_args, const mp_obj_t *args) {
+
+  int enable = mp_obj_get_int(args[1]);
+
+  if (enable) {
+
+      wlan_objs[STATION_IF].cb_sniffer_rx = args[2];
+
+      wifi_set_opmode(STATION_MODE);
+      wifi_set_channel(1); // TODO
+      wifi_promiscuous_enable(0);
+      wifi_set_promiscuous_rx_cb(esp_sniffer_rx_cb);
+      wifi_promiscuous_enable(1);
+  }
+  else {
+      wifi_promiscuous_enable(enable);
+  }
+
+  return mp_const_none;
+}
+
+STATIC MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(esp_setpromisc_obj, 2, 3, esp_setpromisc);
 
 STATIC mp_obj_t esp_scan(mp_obj_t self_in) {
     require_if(self_in, STATION_IF);
@@ -338,8 +373,13 @@ STATIC mp_obj_t esp_config(size_t n_args, const mp_obj_t *args, mp_map_t *kwargs
                         break;
                     }
                     case QS(MP_QSTR_channel): {
-                        req_if = SOFTAP_IF;
-                        cfg.ap.channel = mp_obj_get_int(kwargs->table[i].value);
+                        if (self->if_id == SOFTAP_IF) {
+                            req_if = SOFTAP_IF;
+                            cfg.ap.channel = mp_obj_get_int(kwargs->table[i].value);
+                        }
+                        else {
+                            wifi_set_channel(mp_obj_get_int(kwargs->table[i].value));
+                        }
                         break;
                     }
                     case QS(MP_QSTR_dhcp_hostname): {
@@ -436,6 +476,7 @@ STATIC const mp_map_elem_t wlan_if_locals_dict_table[] = {
     { MP_OBJ_NEW_QSTR(MP_QSTR_isconnected), (mp_obj_t)&esp_isconnected_obj },
     { MP_OBJ_NEW_QSTR(MP_QSTR_config), (mp_obj_t)&esp_config_obj },
     { MP_OBJ_NEW_QSTR(MP_QSTR_ifconfig), (mp_obj_t)&esp_ifconfig_obj },
+    { MP_OBJ_NEW_QSTR(MP_QSTR_setpromisc), (mp_obj_t)&esp_setpromisc_obj },
 };
 
 STATIC MP_DEFINE_CONST_DICT(wlan_if_locals_dict, wlan_if_locals_dict_table);
